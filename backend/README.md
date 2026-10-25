@@ -1,83 +1,76 @@
 # CareerGrid Flask backend
 
-This backend serves the vanilla HTML/CSS/JavaScript interface at `/` and exposes JSON APIs under `/api` over the existing CareerGrid MySQL database. It uses short-lived `mysql-connector-python` connections, parameterized SQL, the existing `active_opportunities`, `student_application_tracking`, and `placement_statistics` views, and the database's application-validation and offer-creation triggers. It does not create or alter tables. MySQL remains the source of truth for referential integrity, uniqueness, checks, and application eligibility.
+The Flask application serves the vanilla frontend at `/` and JSON endpoints under `/api`, backed by the existing MySQL `CareerGrid` database. It uses parameterized queries, the existing views and triggers, and short-lived MySQL connections. Starting Flask never creates or resets project tables or sample rows.
 
-## Configure and run
+## Local setup
 
-From the project root, use Python 3.10 or later. In PowerShell:
+Use Python 3.10 or later and MySQL 8.0.31 or later. From the project root in PowerShell:
 
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-notepad .env
+```
+
+Set the existing MySQL connection values in the ignored local `.env`. Set `SECRET_KEY` to a randomly generated value of at least 32 characters; the application refuses to start without it. For example, create a random key in the current PowerShell environment without displaying it:
+
+```powershell
+$env:SECRET_KEY = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+$env:SESSION_COOKIE_SECURE = "false"
 python -m backend.app
 ```
 
-Edit `.env` with the host, port, MySQL user, local password, and database name you use in MySQL Workbench. `MYSQL_DATABASE` should remain `CareerGrid`. Leave no actual password in `.env.example`; `.env` is excluded by `.gitignore`. MySQL must be running and the account must have suitable privileges on the project database. The backend never creates a schema or sample data.
+For production, keep `SECRET_KEY` in the hosting platform's secret store, enable HTTPS, and set `SESSION_COOKIE_SECURE=true`. Do not commit `.env`, passwords, or generated keys. The local development server listens on `127.0.0.1:5000`.
 
-The Flask development server binds to `127.0.0.1:5000`. Open `http://127.0.0.1:5000/` for the CareerGrid frontend. The UI calls the same-origin Flask API; no separate frontend server or CORS setup is needed. The database check remains at `http://127.0.0.1:5000/api/health/db` and active opportunities at `http://127.0.0.1:5000/api/opportunities`.
+## Authentication database setup
 
-## Frontend
+1. For a fresh database only, run `01_schema.sql`, `02_triggers.sql`, `03_views.sql`, and `04_sample_data.sql` in that order; run 04 only once. Do not replay 01 or 04 on a populated database.
+2. Run `07_auth.sql` if the administrator credential table is missing, `08_auth_student_credentials.sql` if the student credential table is missing, and `09_student_registration_approval.sql` once. These migrations preserve existing records; 09 adds a default-active flag for existing students while registrations are inserted inactive.
+3. Copy `.env.example` to the ignored local `.env` and set the MySQL host, port, user, password and database. Set `SECRET_KEY` to a random value of at least 32 characters. Never commit `.env` or put real credentials in documentation.
+4. For existing accounts, run `python -m backend.set_password` from the repository root. Choose `student` or `admin`, identify an existing account, then enter a new password at the hidden prompt. It must be 12–72 UTF-8 bytes and is saved only as a Flask-Bcrypt hash. No default passwords are created.
 
-The vanilla frontend is in `../frontend/`. Use the landing page's Student tab to enter an existing `student_id`; it checks that real profile through the API. The Placement cell tab opens a local admin demo using an entered `admin_id`, which the API uses as `created_by_admin_id` for new opportunities. This is not account authentication.
+Student sign-in uses email or roll number plus password; administrator sign-in uses email plus password. Both use signed Flask session cookies with `HttpOnly`, `SameSite=Lax`, and an eight-hour lifetime. All state-changing API requests require the session-bound `X-CSRF-Token` header. Set `SESSION_COOKIE_SECURE=true` when serving over HTTPS.
 
-Student opportunities, profile, skills, applications, interviews, placements, status updates and offer decisions call existing `/api` endpoints. The admin dashboard and application/interview management use existing admin/report endpoints. Opportunity management lists active opportunities from the public active view; the current backend has no admin endpoint to list Draft, Closed, or Cancelled opportunities. The skill manager can add a skill by ID, while a searchable catalog needs `GET /api/skills`.
+Start the backend from the repository root with `python -m backend.app` after configuring `.env` and the environment `SECRET_KEY`. Student registration (`POST /api/auth/register`) stores an inactive account; an administrator must approve it in the Students page before it can sign in. The server derives identity and role from the signed session. Students can use only routes scoped to their own student ID. `/admin/*` and `/reports/*` require an administrator session. Public routes are limited to health checks, the skill catalog, and opportunity browsing/detail. IDs submitted by the browser are never accepted as authentication proof.
 
-The current backend has no login or authorization. The UI labels admin access as a demo and warns against public exposure. Before real deployment, add a verified authentication flow (for example `POST /api/auth/login`) and enforce role-based authorization in Flask, plus a suitable credential/identity source; student IDs and admin IDs alone are not credentials.
+## API response contract
 
-## Responses and errors
+Success responses use `{ "success": true, "data": ..., "error": null }`; errors use `{ "success": false, "data": null, "error": { "code": ..., "message": ... } }`. Unauthenticated requests return 401, authenticated but disallowed roles/records return 403, validation errors return 400, duplicates return 409, and database rule failures return 422.
 
-Successful responses have `{ "success": true, "data": ..., "error": null }`. Errors have `{ "success": false, "data": null, "error": { "code": ..., "message": ... } }`. Validation errors return 400, missing records 404, duplicate records 409, and database rule or constraint rejections 422. Unexpected failures return a generic message; connector details are written only to the local server log.
-
-Application creation inserts only the student, opportunity, and optional resume reference. MySQL's `trg_application_validate_before_insert` checks existence, open status, time window, and CGPA eligibility. Duplicate applications are stopped by the existing unique key. Selecting an application through the administrator API invokes the existing after-update trigger, which creates its pending PLACEMENT row. No backend endpoint edits the database schema.
-
-## API routes
-
-All routes are rooted at `/api`; path IDs are positive database IDs. JSON write requests use `Content-Type: application/json`.
-
-| Method | Route | Purpose |
+| Method | Route | Access |
 |---|---|---|
-| GET | `/health`, `/health/db` | Process and database checks |
-| GET | `/opportunities` | Active opportunities from the existing view; optional `type`, `location`, `company`, `minimum_cgpa` (published cutoff floor), `eligible_cgpa` (show roles this CGPA can meet) filters |
-| GET | `/opportunities/<id>` | Opportunity record and company details |
-| GET, PUT | `/students/<id>` | Student profile; update supplied profile fields |
-| GET, POST | `/students/<id>/skills` | List or add a skill association (`skill_id`, optional proficiency/date) |
-| DELETE | `/students/<id>/skills/<skill_id>` | Remove a skill association |
-| GET | `/students/<id>/applications` | Application history |
-| GET | `/students/<id>/applications/<application_id>` | One application's current status |
-| POST | `/students/<id>/applications` | Apply using `opportunity_id` and optional `resume_reference` |
-| PATCH | `/students/<id>/applications/<application_id>` | Withdraw an application where its state permits |
-| GET | `/students/<id>/interviews` | Interview rounds attached to the student's applications |
-| GET | `/students/<id>/placements` | All offer records; supports multiple offers per student |
-| PATCH | `/students/<id>/placements/<placement_id>` | Set an offer decision/status (`Offer Pending`, `Accepted`, `Declined`, `Joined`, `Withdrawn`) |
-| GET | `/admin/students`, `/admin/companies` | Administrator lists |
-| GET | `/admin/applications` | Application tracking; optional `status` and `company_id` filters |
-| POST, PUT | `/admin/opportunities`, `/admin/opportunities/<id>` | Create or update opportunity records |
-| PATCH | `/admin/applications/<id>` | Update status and/or remarks |
-| POST | `/admin/applications/<id>/interviews` | Schedule a round (`round_number`, `scheduled_at`, `mode`) |
-| PATCH | `/admin/interviews/<id>` | Update schedule, mode, result, or feedback |
-| GET | `/reports/placement-statistics` | Existing company/type offer statistics view |
-| GET | `/reports/application-statistics` | Applications grouped by status |
-| GET | `/reports/applications-by-company` | Application counts per company |
-| GET | `/reports/placements-by-department` | Offer and joined counts per department |
-| GET | `/reports/average-compensation` | Average disclosed offer compensation by company/type |
-| GET | `/reports/opportunity-application-counts` | Application count per opening |
-| GET | `/reports/overview` | Total opportunities, applications, offers, and joined offers |
+| GET | `/api/health`, `/api/health/db` | Public |
+| GET | `/api/opportunities`, `/api/opportunities/<id>`, `/api/skills` | Public |
+| GET | `/api/auth/session` | Public; restores session and supplies CSRF token |
+| POST | `/api/auth/student/login`, `/api/auth/admin/login`, `/api/auth/logout` | CSRF token required |
+| GET, PUT | `/api/students/<id>` | Own student |
+| GET, POST | `/api/students/<id>/skills` | Own student |
+| DELETE | `/api/students/<id>/skills/<skill_id>` | Own student |
+| GET, POST, PATCH | `/api/students/<id>/applications` and `/api/students/<id>/applications/<application_id>` | Own student |
+| GET | `/api/students/<id>/interviews`, `/api/students/<id>/placements` | Own student |
+| PATCH | `/api/students/<id>/placements/<placement_id>` | Own student |
+| GET | `/api/admin/students`, `/api/admin/companies`, `/api/admin/opportunities`, `/api/admin/applications` | Administrator |
+| POST | `/api/admin/students/<id>/activate` | Administrator; approves a pending registration |
+| POST, PUT | `/api/admin/companies`, `/api/admin/companies/<id>` | Administrator; company create/update |
+| POST, PUT | `/api/admin/opportunities`, `/api/admin/opportunities/<id>` | Administrator; creator ID comes from session |
+| PATCH | `/api/admin/applications/<id>`, `/api/admin/interviews/<id>` | Administrator |
+| POST | `/api/admin/applications/<id>/interviews` | Administrator |
+| GET | `/api/reports/*` | Administrator |
 
-Dates sent in JSON should be ISO 8601 (`YYYY-MM-DD` for dates; `YYYY-MM-DDTHH:MM:SS` for date-times). IDs and enum values are validated before SQL, and all SQL parameters are bound by the connector.
+`trg_application_validate_before_insert` remains the source of application eligibility checks. `trg_application_selected_after_update` creates the pending offer when an application becomes selected. The Flask API does not duplicate either trigger.
 
-## Smoke checks
+Application statuses move forward through the recruitment process; `Selected`, `Rejected`, and `Withdrawn` are terminal. Student offer decisions permit `Offer Pending` to `Accepted`, `Declined`, or `Withdrawn`, and `Accepted` to `Joined` or `Withdrawn`. Terminal offers cannot be reopened. Company deletion is intentionally omitted because historical opportunities reference companies.
 
-After starting Flask and configuring a populated CareerGrid database, run:
+## Tests and live checks
+
+Run the automated tests from the repository root with a test-only key in the process environment:
 
 ```powershell
-python -m backend.check_backend
+$env:SECRET_KEY = "unit-test-only-secret-key-at-least-32-bytes"
+python -m unittest discover -v
 ```
 
-The check calls the health, opportunities, applications, and placement-report endpoints. It then verifies that the real application trigger rejects a nonexistent opportunity within a transaction that is rolled back. It needs at least one existing student. The trigger check does not leave a row behind. Set `CAREERGRID_API_URL` if Flask is listening elsewhere.
+Tests mock database calls and verify auth, ownership, registration logic, company management, and workflow transitions; they do not prove MySQL integration. To check a configured live instance, start the server with `python -m backend.app`, then run `python -m backend.check_backend`; enter the administrator email and password when prompted. The checker performs a deliberately rejected application insert inside a transaction and rolls it back. It is not required for normal unit tests. Do not run sample-data scripts against an existing database.
 
-## Frontend connection and access boundary
-
-The future browser frontend can call these routes with `fetch`, parse the shared JSON response, and send JSON bodies for updates. The development API currently trusts student IDs supplied in URLs and exposes unauthenticated `/admin` endpoints to local clients. It is for the project/demo environment; before deployment or use with real student data, add authentication, authorization, HTTPS, and deployment-grade secret handling. Those are intentionally not represented as implemented features here.
+Run the dashboard API-failure rendering regression with `node frontend/test_dashboard_failures.cjs`; this uses mocked responses and a minimal DOM shim, not a real browser.

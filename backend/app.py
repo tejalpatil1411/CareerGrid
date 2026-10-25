@@ -1,13 +1,14 @@
 """CareerGrid API application factory and consistent error responses."""
 
 import logging
-
-import mysql.connector
+from datetime import timedelta
 from pathlib import Path
 
+import mysql.connector
 from flask import Flask, jsonify
 from werkzeug.exceptions import HTTPException
 
+from .auth import auth_api, authorization_guard, bcrypt, csrf_guard
 from .config import Config
 from .routes import api
 from .validation import ValidationError
@@ -16,9 +17,33 @@ from .validation import ValidationError
 def create_app(config_object=Config):
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
     app = Flask(__name__, static_folder=str(frontend_dir), static_url_path="/frontend")
-    app.config.from_object(config_object)
+    if isinstance(config_object, dict):
+        app.config.from_mapping(config_object)
+    else:
+        app.config.from_object(config_object)
+
+    secret_key = app.config.get("SECRET_KEY")
+    if not isinstance(secret_key, str) or len(secret_key) < 32:
+        raise RuntimeError("Set SECRET_KEY to a random value of at least 32 characters before starting CareerGrid.")
+
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=bool(app.config.get("SESSION_COOKIE_SECURE", False)),
+        SESSION_REFRESH_EACH_REQUEST=False,
+        PERMANENT_SESSION_LIFETIME=app.config.get("PERMANENT_SESSION_LIFETIME", timedelta(hours=8)),
+    )
+    bcrypt.init_app(app)
     app.register_blueprint(api)
+    app.register_blueprint(auth_api)
     logging.basicConfig(level=logging.INFO)
+
+    @app.before_request
+    def protect_api():
+        csrf_error = csrf_guard()
+        if csrf_error is not None:
+            return csrf_error
+        return authorization_guard()
 
     @app.errorhandler(ValidationError)
     def validation_error(error):
@@ -27,9 +52,13 @@ def create_app(config_object=Config):
 
     @app.errorhandler(mysql.connector.Error)
     def database_error(error):
-        # Connector diagnostics stay in the server log; clients receive a safe explanation.
-        logging.warning("CareerGrid database operation failed (type=%s, errno=%s, sqlstate=%s)",
-                        type(error).__name__, error.errno, error.sqlstate)
+        logging.warning(
+            "CareerGrid database operation failed (type=%s, errno=%s, sqlstate=%s, message=%s)",
+            type(error).__name__,
+            error.errno,
+            error.sqlstate,
+            error.msg,
+        )
         if error.errno == 1062:
             code, message, status = "duplicate_record", "A record with those unique values already exists.", 409
         elif error.errno == 1644 or error.sqlstate == "45000":

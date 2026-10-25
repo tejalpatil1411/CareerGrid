@@ -6,9 +6,10 @@
   const app = document.getElementById('app');
   const toastRoot = document.getElementById('toast-root');
   const state = {
-    role: sessionStorage.getItem('cgRole') || '',
-    studentId: sessionStorage.getItem('cgStudentId') || '',
-    adminId: sessionStorage.getItem('cgAdminId') || '',
+    role: '',
+    studentId: '',
+    userId: null,
+    csrfToken: '',
     student: null,
     applicationFilter: 'All',
     opportunityFilters: { search: '', type: '', location: '', eligible: '' },
@@ -52,12 +53,19 @@
     return 'blue';
   };
   const badge = (status) => `<span class="badge ${badgeClass(status)}">${esc(status || 'Pending')}</span>`;
+  const retryPanel = (message, label = 'Data could not be loaded') => `<div class="notice warning" role="alert"><strong>${esc(label)}:</strong> ${esc(message)} <button class="button button-outline button-sm" data-action="refresh">Retry</button></div>`;
+  const applicationNext = { 'Applied': ['Under Review', 'Shortlisted', 'Interview', 'Selected', 'Rejected', 'Withdrawn'], 'Under Review': ['Shortlisted', 'Interview', 'Selected', 'Rejected', 'Withdrawn'], 'Shortlisted': ['Interview', 'Selected', 'Rejected', 'Withdrawn'], 'Interview': ['Shortlisted', 'Selected', 'Rejected', 'Withdrawn'], 'Selected': [], 'Rejected': [], 'Withdrawn': [] };
   const dateTimeInput = (value) => String(value || '').replace(' ', 'T').slice(0, 19);
 
   async function api(path, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) };
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && state.csrfToken) headers['X-CSRF-Token'] = state.csrfToken;
     const response = await fetch(`${API}${path}`, {
       ...options,
-      headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) },
+      method,
+      credentials: 'same-origin',
+      headers,
     });
     let result;
     try { result = await response.json(); } catch { throw new Error(`The server returned an unreadable response (${response.status}).`); }
@@ -65,6 +73,12 @@
       const error = new Error(result?.error?.message || `Request failed (${response.status}).`);
       error.status = response.status;
       error.code = result?.error?.code;
+      if ((error.code === 'unauthenticated' || error.code === 'csrf_failed') && state.role) {
+        state.role = ''; state.studentId = ''; state.userId = null; state.student = null; state.csrfToken = '';
+        go('welcome');
+        api('/auth/session').then((current) => { state.csrfToken = current.csrf_token; }).catch(() => {});
+        toast('Your session expired. Sign in again to continue.', 'error');
+      }
       throw error;
     }
     return result.data;
@@ -100,21 +114,21 @@
 
   function shell(content, pageTitle, active, role = state.role) {
     const admin = role === 'admin';
-    const name = admin ? 'Placement admin · demo' : (state.student?.full_name || `Student #${state.studentId}`);
+    const name = admin ? 'Placement administrator' : (state.student?.full_name || `Student #${state.studentId}`);
     const mobileItems = admin
-      ? [['admin', 'Home', 'grid'], ['admin/opportunities', 'Jobs', 'compass'], ['admin/applications', 'Apps', 'file']]
+      ? [['admin', 'Home', 'grid'], ['admin/students', 'Students', 'user'], ['admin/companies', 'Companies', 'user'], ['admin/opportunities', 'Jobs', 'compass'], ['admin/applications', 'Apps', 'file']]
       : [['dashboard', 'Home', 'grid'], ['opportunities', 'Explore', 'compass'], ['applications', 'Applied', 'file'], ['profile', 'Profile', 'user']];
     return `<div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <a class="brand" href="#/${admin ? 'admin' : 'dashboard'}"><span class="brand-mark">c</span><span>careergrid<small>Find your next step</small></span></a>
         <div class="nav-label">Workspace</div>
         <nav class="nav-list" aria-label="Main navigation">${admin
-          ? navLink('admin', 'Overview', 'grid', active === 'admin') + navLink('admin/opportunities', 'Opportunities', 'compass', active === 'admin/opportunities') + navLink('admin/applications', 'Applications & interviews', 'file', active === 'admin/applications')
+          ? navLink('admin', 'Overview', 'grid', active === 'admin') + navLink('admin/students', 'Students', 'user', active === 'admin/students') + navLink('admin/companies', 'Companies', 'user', active === 'admin/companies') + navLink('admin/opportunities', 'Opportunities', 'compass', active === 'admin/opportunities') + navLink('admin/applications', 'Applications & interviews', 'file', active === 'admin/applications')
           : navLink('dashboard', 'Overview', 'grid', active === 'dashboard') + navLink('opportunities', 'Find opportunities', 'compass', active === 'opportunities') + navLink('applications', 'My applications', 'file', active === 'applications') + navLink('interviews', 'Interviews', 'chat', active === 'interviews') + navLink('placements', 'Offers & placements', 'award', active === 'placements') + navLink('profile', 'My profile', 'user', active === 'profile')}
         </nav>
         <div class="sidebar-bottom">
-          ${admin ? '<div class="workspace-note"><strong><span class="dot"></span>Local demo access</strong>Admin routes currently have no authentication. Do not expose this demo on a public network.</div>' : '<div class="workspace-note"><strong><span class="dot"></span>Live CareerGrid records</strong>Your opportunities and progress come from the existing CareerGrid API.</div>'}
-          <div class="sidebar-user"><span class="avatar">${esc(initials(name))}</span><span><span class="sidebar-user-name">${esc(name)}</span><span class="sidebar-user-meta">${admin ? `Admin ID ${esc(state.adminId)}` : esc(state.student?.department || 'Student account')}</span></span><button class="logout" type="button" data-action="signout" title="Switch account">${icon('close')}</button></div>
+          ${admin ? '<div class="workspace-note"><strong><span class="dot"></span>Authenticated placement access</strong>Administrator actions require a signed-in account.</div>' : '<div class="workspace-note"><strong><span class="dot"></span>Live CareerGrid records</strong>Your opportunities and progress come from the existing CareerGrid API.</div>'}
+          <div class="sidebar-user"><span class="avatar">${esc(initials(name))}</span><span><span class="sidebar-user-name">${esc(name)}</span><span class="sidebar-user-meta">${admin ? `Admin ID ${esc(state.userId)}` : esc(state.student?.department || 'Student account')}</span></span><button class="logout" type="button" data-action="signout" title="Sign out">${icon('close')}</button></div>
         </div>
       </aside>
       <main class="main">
@@ -125,11 +139,14 @@
     </div>`;
   }
 
-  function welcomePage(error = '') {
-    return `<main class="landing"><nav class="landing-nav"><a href="#/welcome" class="landing-brand"><span class="brand-mark">c</span>careergrid</a><div class="landing-nav-links"><a href="#/opportunities">Explore roles</a><a class="hide-mobile" href="#/welcome">For students</a><a class="button button-sm" href="#access">Sign in ${icon('arrow', 'icon-sm')}</a></div></nav>
+  function welcomePage() {
+    const student = state.accessRole === 'student';
+    return `<main class="landing"><nav class="landing-nav"><a href="#/welcome" class="landing-brand"><span class="brand-mark">c</span>careergrid</a><div class="landing-nav-links"><a href="#/opportunities">Explore roles</a><a class="button button-sm" href="#access">Sign in ${icon('arrow', 'icon-sm')}</a></div></nav>
       <div class="landing-main"><div class="landing-copy"><span class="landing-badge">${icon('spark', 'icon-sm')} BUILT FOR YOUR NEXT BIG MOVE</span><h1 class="landing-title">A good career<br>starts with <em>one yes.</em></h1><p class="landing-description">Find internships that challenge you, placements that excite you, and a clearer path from where you are to where you want to be.</p><a class="button" href="#/opportunities">Explore opportunities ${icon('arrow', 'icon-sm')}</a><div class="landing-points"><span class="landing-point"><span class="check">✓</span> Roles from real employers</span><span class="landing-point"><span class="check">✓</span> Track every application</span><span class="landing-point"><span class="check">✓</span> Your next step, in one place</span></div><div class="landing-visual"></div></div>
-      <section class="access-card" id="access"><div class="eyebrow">WELCOME TO CAREERGRID</div><h2>Pick up where you left off</h2><p class="page-subtitle">Use your CareerGrid record to open your workspace.</p><div class="access-tabs"><button class="access-tab ${state.accessRole === 'student' ? 'active' : ''}" data-action="access-role" data-role="student">Student</button><button class="access-tab ${state.accessRole === 'admin' ? 'active' : ''}" data-action="access-role" data-role="admin">Placement cell</button></div>
-      ${state.accessRole === 'student' ? `<form class="access-form" id="student-access-form"><div class="field"><label for="student-id">Student ID</label><input class="input" id="student-id" name="student_id" type="number" min="1" placeholder="Enter your database student ID" required><span class="form-help">Your student record is checked against CareerGrid before opening the dashboard.</span></div>${error ? `<div class="form-error">${esc(error)}</div>` : ''}<button class="button" type="submit">Continue to my dashboard ${icon('arrow', 'icon-sm')}</button></form><div class="notice">This project version uses your student ID to load a real profile. It does not have password-based sign-in yet.</div>` : `<form class="access-form" id="admin-access-form"><div class="field"><label for="admin-id">Placement admin ID</label><input class="input" id="admin-id" name="admin_id" type="number" min="1" placeholder="Enter your placement admin ID" required><span class="form-help">The current API has no admin login or identity-check endpoint.</span></div>${error ? `<div class="form-error">${esc(error)}</div>` : ''}<button class="button" type="submit">Open demo workspace ${icon('arrow', 'icon-sm')}</button></form><div class="notice warning">Demo access only. Admin endpoints are unauthenticated in this backend. Do not expose this app publicly.</div>`}</section></div>
+      <section class="access-card" id="access"><div class="eyebrow">WELCOME TO CAREERGRID</div><h2>Sign in to your account</h2><p class="page-subtitle">Use credentials provided for your existing CareerGrid record.</p><div class="access-tabs"><button class="access-tab ${student ? 'active' : ''}" data-action="access-role" data-role="student">Student</button><button class="access-tab ${!student ? 'active' : ''}" data-action="access-role" data-role="admin">Placement cell</button></div>
+      <form class="access-form" id="${student ? 'student-access-form' : 'admin-access-form'}"><div class="field"><label for="login-identifier">${student ? 'Email or roll number' : 'Placement administrator email'}</label><input class="input" id="login-identifier" name="identifier" type="text" autocomplete="username" maxlength="254" required></div><div class="field"><label for="login-password">Password</label><input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required></div><button class="button" type="submit">Sign in ${icon('arrow', 'icon-sm')}</button></form>
+      ${student ? `<details class="registration-details"><summary>New to CareerGrid? Create a student account</summary><form class="access-form" id="student-registration-form"><div class="field"><label>Roll number</label><input class="input" name="roll_no" maxlength="30" required></div><div class="field"><label>Full name</label><input class="input" name="full_name" maxlength="100" required></div><div class="field"><label>Email</label><input class="input" name="email" type="email" maxlength="254" required></div><div class="field"><label>Department</label><input class="input" name="department" maxlength="80" required></div><div class="field"><label>Graduation year</label><input class="input" name="graduation_year" type="number" min="2000" max="9999" required></div><div class="field"><label>Phone <span class="muted">(optional)</span></label><input class="input" name="phone" maxlength="20"></div><div class="field"><label>Date of birth <span class="muted">(optional)</span></label><input class="input" name="date_of_birth" type="date"></div><div class="field"><label>CGPA out of 10 <span class="muted">(optional)</span></label><input class="input" name="cgpa" type="number" min="0" max="10" step="0.01"></div><div class="field"><label>Create password</label><input class="input" name="password" type="password" minlength="12" autocomplete="new-password" required><span class="form-help">Use at least 12 characters.</span></div><button class="button" type="submit">Create account</button></form></details>` : ''}
+      <div class="notice">Student and placement administrator access is verified by CareerGrid.</div></section></div>
       <footer class="landing-footer"><span>© CareerGrid · Built for the journey ahead</span><span>Internships, placements and progress in one place</span></footer></main>`;
   }
 
@@ -153,8 +170,8 @@
 
   async function loadStudent() {
     if (!state.studentId) return null;
-    try { state.student = await api(`/students/${encodeURIComponent(state.studentId)}`); return state.student; }
-    catch (error) { console.warn('Could not refresh student profile:', error.message); return state.student; }
+    try { state.student = await api(`/students/${encodeURIComponent(state.studentId)}`); state.studentLoadError = ''; return state.student; }
+    catch (error) { state.studentLoadError = error.message; return null; }
   }
 
   async function checkHealth() {
@@ -176,27 +193,28 @@
 
   async function dashboardPage() {
     const student = await loadStudent();
-    if (!student) return `<div class="empty"><span class="empty-icon">${icon('user')}</span><h3>Student profile unavailable</h3><p>Switch account and enter a Student ID that exists in CareerGrid.</p><button class="button button-outline" data-action="signout">Return to sign in</button></div>`;
+    if (!student) return `<div class="card card-pad"><h2>Student profile unavailable</h2>${retryPanel(state.studentLoadError || 'The signed-in student profile could not be loaded.', 'Profile unavailable')}<button class="button button-outline" data-action="signout">Sign out</button></div>`;
     const id = encodeURIComponent(state.studentId);
     const [applicationsResult, interviewsResult, placementsResult, opportunitiesResult, skillsResult] = await Promise.allSettled([
       api(`/students/${id}/applications`), api(`/students/${id}/interviews`), api(`/students/${id}/placements`), api('/opportunities'), api(`/students/${id}/skills`),
     ]);
-    const applications = applicationsResult.status === 'fulfilled' ? applicationsResult.value : [];
-    const interviews = interviewsResult.status === 'fulfilled' ? interviewsResult.value : [];
-    const placements = placementsResult.status === 'fulfilled' ? placementsResult.value : [];
-    const opportunities = opportunitiesResult.status === 'fulfilled' ? opportunitiesResult.value.slice(0, 3) : [];
-    const skills = skillsResult.status === 'fulfilled' ? skillsResult.value : [];
-    const nextInterview = interviews.find((item) => !item.result && interviewDate(item.scheduled_at) >= new Date());
-    const activeOffers = placements.filter((item) => !['Declined', 'Withdrawn'].includes(item.placement_status)).length;
+    const applications = applicationsResult.status === 'fulfilled' ? applicationsResult.value : null;
+    const interviews = interviewsResult.status === 'fulfilled' ? interviewsResult.value : null;
+    const placements = placementsResult.status === 'fulfilled' ? placementsResult.value : null;
+    const opportunities = opportunitiesResult.status === 'fulfilled' ? opportunitiesResult.value.slice(0, 3) : null;
+    const skills = skillsResult.status === 'fulfilled' ? skillsResult.value : null;
+    const dashboardFailures = [applicationsResult, interviewsResult, placementsResult, opportunitiesResult, skillsResult].filter((item) => item.status === 'rejected');
+    const nextInterview = interviews?.find((item) => !item.result && interviewDate(item.scheduled_at) >= new Date());
+    const activeOffers = placements?.filter((item) => !['Declined', 'Withdrawn'].includes(item.placement_status)).length;
     const completionFields = ['full_name', 'email', 'phone', 'department', 'graduation_year', 'cgpa'].filter((key) => student[key] !== null && student[key] !== '').length;
     const completion = Math.round(completionFields / 6 * 100);
-    const recent = applications.slice(0, 4);
+    const recent = applications?.slice(0, 4);
     return `<div class="hero-card"><div class="hero-copy"><div class="hero-kicker">${icon('spark', 'icon-sm')} YOUR CAREER JOURNEY</div><h1>Hey ${esc((student.full_name || 'there').split(' ')[0])}, your next chapter is waiting.</h1><p>Keep exploring, keep applying. Every small step gets you closer to the work you want to do.</p><button class="button button-light" data-nav="opportunities">Find your next opportunity ${icon('arrow', 'icon-sm')}</button></div><div class="hero-decoration"></div></div>
-      <div class="grid grid-4" style="margin-top:17px">${statCard('Applications sent', applications.length, 'Across all opportunities', 'file')}${statCard('Interviews', interviews.length, nextInterview ? `Next · ${timeFormat(nextInterview.scheduled_at)}` : 'Rounds on your applications', 'chat')}${statCard('Offers to consider', activeOffers, 'Including multiple offers', 'award')}${statCard('Profile strength', `${completion}%`, `${skills.length} skills added`, 'user')}</div>
-      <div class="dashboard-columns"><section><div class="section-heading"><div><h2>Recommended for you</h2><p>Open roles from CareerGrid</p></div><button class="link-button" data-nav="opportunities">View all ${icon('arrow', 'icon-sm')}</button></div>${opportunities.length ? `<div class="job-list">${opportunities.map(jobRow).join('')}</div>` : `<div class="card card-pad">${emptyState('No open opportunities yet', 'New roles will appear here when they are available.', 'compass')}</div>`}
-      <div class="section-heading"><div><h2>Application activity</h2><p>Your most recent applications</p></div><button class="link-button" data-nav="applications">See all ${icon('arrow', 'icon-sm')}</button></div><div class="card list-card">${recent.length ? recent.map((item) => `<div class="application-mini"><span class="job-title">${esc(item.opportunity_title)}</span>${badge(item.status)}<span class="mini-sub">${esc(item.company_name)} · applied ${dateFormat(item.applied_at)}</span></div>`).join('') : emptyState('Your story starts here', 'Browse open opportunities and apply when something feels right.', 'file', 'Explore roles', 'opportunities')}</div></section>
-      <aside><div class="section-heading"><div><h2>Profile snapshot</h2><p>A little about you</p></div><button class="link-button" data-nav="profile">Edit ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad"><div class="profile-completion"><div class="completion-ring" style="--progress:${completion}"><span>${completion}%</span></div><div><h3 style="margin:0 0 4px">Make your profile shine</h3><p class="small muted" style="margin:0">Complete your profile so employers can see what you bring.</p></div></div><div class="progress-line"><div class="progress-track"><span style="width:${completion}%"></span></div><span class="tiny muted">${completionFields}/6</span></div><div class="chip-list" style="margin-top:16px">${skills.length ? skills.slice(0, 6).map((skill) => `<span class="skill-chip">${esc(skill.skill_name)}</span>`).join('') : '<span class="small muted">Add skills to your profile.</span>'}</div></div>
-      <div class="section-heading"><div><h2>Coming up</h2><p>Interview schedule</p></div><button class="link-button" data-nav="interviews">View all ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad">${nextInterview ? `<div class="interview-card" style="padding:0"><div class="date-tile"><strong>${esc(interviewDate(nextInterview.scheduled_at).getDate())}</strong><span>${esc(new Intl.DateTimeFormat('en-IN', { month: 'short' }).format(interviewDate(nextInterview.scheduled_at)))}</span></div><div class="interview-content"><h3>${esc(nextInterview.opportunity_title)}</h3><div class="small muted">${esc(nextInterview.company_name)} · Round ${esc(nextInterview.round_number)}</div><div class="small muted" style="margin-top:6px">${icon('clock', 'icon-sm')} ${esc(timeFormat(nextInterview.scheduled_at))} · ${esc(nextInterview.mode)}</div></div></div>` : emptyState('No interviews scheduled', 'When a company schedules a round, you will find the details here.', 'chat')}</div></aside></div>`;
+      ${dashboardFailures.length ? retryPanel(dashboardFailures.map((item) => item.reason.message).join(' · '), 'Some dashboard data is unavailable') : ''}<div class="grid grid-4" style="margin-top:17px">${statCard('Applications sent', applications?.length ?? '—', 'Across all opportunities', 'file')}${statCard('Interviews', interviews?.length ?? '—', nextInterview ? `Next · ${timeFormat(nextInterview.scheduled_at)}` : 'Rounds on your applications', 'chat')}${statCard('Offers to consider', activeOffers ?? '—', 'Including multiple offers', 'award')}${statCard('Profile strength', `${completion}%`, `${skills?.length ?? '—'} skills added`, 'user')}</div>
+      <div class="dashboard-columns"><section><div class="section-heading"><div><h2>Recommended for you</h2><p>Open roles from CareerGrid</p></div><button class="link-button" data-nav="opportunities">View all ${icon('arrow', 'icon-sm')}</button></div>${opportunities === null ? retryPanel(opportunitiesResult.reason.message, 'Opportunities unavailable') : opportunities.length ? `<div class="job-list">${opportunities.map(jobRow).join('')}</div>` : `<div class="card card-pad">${emptyState('No open opportunities yet', 'New roles will appear here when they are available.', 'compass')}</div>`}
+      <div class="section-heading"><div><h2>Application activity</h2><p>Your most recent applications</p></div><button class="link-button" data-nav="applications">See all ${icon('arrow', 'icon-sm')}</button></div><div class="card list-card">${applications === null ? retryPanel(applicationsResult.reason.message, 'Applications unavailable') : recent.length ? recent.map((item) => `<div class="application-mini"><span class="job-title">${esc(item.opportunity_title)}</span>${badge(item.status)}<span class="mini-sub">${esc(item.company_name)} · applied ${dateFormat(item.applied_at)}</span></div>`).join('') : emptyState('Your story starts here', 'Browse open opportunities and apply when something feels right.', 'file', 'Explore roles', 'opportunities')}</div></section>
+      <aside><div class="section-heading"><div><h2>Profile snapshot</h2><p>A little about you</p></div><button class="link-button" data-nav="profile">Edit ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad"><div class="profile-completion"><div class="completion-ring" style="--progress:${completion}"><span>${completion}%</span></div><div><h3 style="margin:0 0 4px">Make your profile shine</h3><p class="small muted" style="margin:0">Complete your profile so employers can see what you bring.</p></div></div><div class="progress-line"><div class="progress-track"><span style="width:${completion}%"></span></div><span class="tiny muted">${completionFields}/6</span></div><div class="chip-list" style="margin-top:16px">${skills === null ? retryPanel(skillsResult.reason.message, 'Skills unavailable') : skills.length ? skills.slice(0, 6).map((skill) => `<span class="skill-chip">${esc(skill.skill_name)}</span>`).join('') : '<span class="small muted">Add skills to your profile.</span>'}</div></div>
+      <div class="section-heading"><div><h2>Coming up</h2><p>Interview schedule</p></div><button class="link-button" data-nav="interviews">View all ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad">${interviews === null ? retryPanel(interviewsResult.reason.message, 'Interviews unavailable') : nextInterview ? `<div class="interview-card" style="padding:0"><div class="date-tile"><strong>${esc(interviewDate(nextInterview.scheduled_at).getDate())}</strong><span>${esc(new Intl.DateTimeFormat('en-IN', { month: 'short' }).format(interviewDate(nextInterview.scheduled_at)))}</span></div><div class="interview-content"><h3>${esc(nextInterview.opportunity_title)}</h3><div class="small muted">${esc(nextInterview.company_name)} · Round ${esc(nextInterview.round_number)}</div><div class="small muted" style="margin-top:6px">${icon('clock', 'icon-sm')} ${esc(timeFormat(nextInterview.scheduled_at))} · ${esc(nextInterview.mode)}</div></div></div>` : emptyState('No interviews scheduled', 'When a company schedules a round, you will find the details here.', 'chat')}</div></aside></div>`;
   }
 
   function emptyState(title, copy, glyph = 'spark', buttonLabel = '', route = '') {
@@ -265,8 +283,8 @@
     let rows = [];
     let error = '';
     try { rows = await api(`/students/${encodeURIComponent(state.studentId)}/placements`); } catch (err) { error = err.message; }
-    return `<div class="page-head"><div><div class="eyebrow">YOUR OPTIONS, YOUR CALL</div><h1>Offers & placements</h1><p class="page-subtitle">Review each offer independently and keep its status up to date.</p></div><span class="badge green">${rows.length} ${rows.length === 1 ? 'offer' : 'offers'}</span></div>${error ? `<div class="notice warning">${esc(error)}</div>` : ''}
-      ${rows.length ? `<div class="grid grid-2">${rows.map((offer) => `<article class="card offer-card"><div class="offer-top"><div>${companyMark(offer.company_name)}<h3 style="margin-top:12px">${esc(offer.opportunity_title)}</h3><p class="small muted" style="margin:0">${esc(offer.company_name)} · Application #${esc(offer.application_id)}</p></div>${badge(offer.placement_status)}</div><div class="offer-amount">${esc(money(offer.offered_compensation))}</div><div class="small muted">Annual compensation, when disclosed</div><div class="offer-meta"><div><span>Offer date</span><strong>${esc(dateFormat(offer.offer_date))}</strong></div><div><span>Joining date</span><strong>${esc(dateFormat(offer.joining_date))}</strong></div></div><div class="field" style="margin-top:16px"><label for="offer-state-${Number(offer.placement_id)}">Update your decision</label><div style="display:flex;gap:8px"><select class="select" id="offer-state-${Number(offer.placement_id)}" data-offer-state="${Number(offer.placement_id)}">${['Offer Pending', 'Accepted', 'Declined', 'Joined', 'Withdrawn'].map((status) => `<option ${offer.placement_status === status ? 'selected' : ''}>${status}</option>`).join('')}</select><button class="button button-sm" data-action="offer-update" data-id="${Number(offer.placement_id)}">Save</button></div></div></article>`).join('')}</div>` : error ? '' : emptyState('Offers will show up here', 'When an application is selected, CareerGrid creates an offer record for you to review.', 'award', 'View applications', 'applications')}
+    return `<div class="page-head"><div><div class="eyebrow">YOUR OPTIONS, YOUR CALL</div><h1>Offers & placements</h1><p class="page-subtitle">Review each offer independently and keep its status up to date.</p></div><span class="badge green">${error ? '—' : `${rows.length} ${rows.length === 1 ? 'offer' : 'offers'}`}</span></div>${error ? retryPanel(error, 'Offers unavailable') : ''}
+      ${!error && rows.length ? `<div class="grid grid-2">${rows.map((offer) => { const next = offer.placement_status === 'Offer Pending' ? ['Accepted', 'Declined', 'Withdrawn'] : offer.placement_status === 'Accepted' ? ['Joined', 'Withdrawn'] : []; return `<article class="card offer-card"><div class="offer-top"><div>${companyMark(offer.company_name)}<h3 style="margin-top:12px">${esc(offer.opportunity_title)}</h3><p class="small muted" style="margin:0">${esc(offer.company_name)} · Application #${esc(offer.application_id)}</p></div>${badge(offer.placement_status)}</div><div class="offer-amount">${esc(money(offer.offered_compensation))}</div><div class="small muted">Annual compensation, when disclosed</div><div class="offer-meta"><div><span>Offer date</span><strong>${esc(dateFormat(offer.offer_date))}</strong></div><div><span>Joining date</span><strong>${esc(dateFormat(offer.joining_date))}</strong></div></div>${next.length ? `<div class="field" style="margin-top:16px"><label for="offer-state-${Number(offer.placement_id)}">Update your decision</label><div style="display:flex;gap:8px"><select class="select" id="offer-state-${Number(offer.placement_id)}" data-offer-state="${Number(offer.placement_id)}">${next.map((status) => `<option>${status}</option>`).join('')}</select><button class="button button-sm" data-action="offer-update" data-id="${Number(offer.placement_id)}">Save</button></div></div>` : '<p class="small muted" style="margin-top:16px">This offer is in a final status.</p>'}</article>`; }).join('')}</div>` : !error ? emptyState('Offers will show up here', 'When an application is selected, CareerGrid creates an offer record for you to review.', 'award', 'View applications', 'applications') : ''}
       <div class="notice" style="margin-top:17px">A student can have multiple offers. Update each opportunity on its own; your choice is saved to the existing PLACEMENT record.</div>`;
   }
 
@@ -283,17 +301,31 @@
 
   async function adminDashboardPage() {
     const results = await Promise.allSettled([api('/reports/overview'), api('/reports/application-statistics'), api('/reports/placement-statistics'), api('/admin/applications')]);
-    const data = results.map((item) => item.status === 'fulfilled' ? item.value : []);
-    const overview = data[0] || {};
-    const statuses = data[1] || [];
-    const placements = data[2] || [];
-    const apps = data[3] || [];
+    const data = results.map((item) => item.status === 'fulfilled' ? item.value : null);
+    const overview = data[0];
+    const statuses = data[1];
+    const placements = data[2];
+    const apps = data[3];
     const failed = results.some((result) => result.status === 'rejected');
-    return `<div class="page-head"><div><div class="eyebrow">PLACEMENT CELL</div><h1>Admin overview</h1><p class="page-subtitle">A live view of the opportunities and applications in CareerGrid.</p></div><span class="demo-ribbon">${icon('bell', 'icon-sm')} DEMO ADMIN · ID ${esc(state.adminId)}</span></div>${failed ? '<div class="notice warning" style="margin-bottom:16px">Some report data could not be loaded. Check your connection and refresh.</div>' : ''}
-      <div class="grid grid-4">${statCard('Opportunities', overview.opportunity_count ?? '—', 'All records in CareerGrid', 'compass')}${statCard('Applications', overview.application_count ?? '—', 'Across every opportunity', 'file')}${statCard('Offers', overview.offer_count ?? '—', 'Placement records created', 'award')}${statCard('Joined', overview.joined_count ?? '—', 'Students marked as joined', 'check')}</div>
-      <div class="dashboard-columns"><section><div class="section-heading"><div><h2>Application pipeline</h2><p>Current status counts from the database</p></div><button class="link-button" data-nav="admin/applications">Review applications ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad">${statuses.length ? statuses.map((row) => `<div class="application-mini"><span class="job-title">${esc(row.status)}</span><span class="badge ${badgeClass(row.status)}">${esc(row.application_count)}</span><span class="mini-sub">Applications currently in this stage</span></div>`).join('') : emptyState('No applications yet', 'Application counts will appear when students apply.', 'file')}</div>
-      <div class="section-heading"><div><h2>Offers by company</h2><p>Offer counts and disclosed compensation</p></div></div><div class="card table-card"><div class="table-wrap"><table><thead><tr><th>Company</th><th>Type</th><th>Offers</th><th>Average compensation</th></tr></thead><tbody>${placements.length ? placements.map((row) => `<tr><td><strong>${esc(row.company_name)}</strong></td><td>${esc(row.opportunity_type)}</td><td>${esc(row.offer_count)}</td><td>${esc(money(row.average_compensation))}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">No offer statistics yet.</td></tr>'}</tbody></table></div></div></section>
-      <aside><div class="section-heading"><div><h2>Quick actions</h2><p>Manage the recruitment cycle</p></div></div><div class="card card-pad form-stack"><button class="button" data-nav="admin/opportunities">${icon('plus', 'icon-sm')} Create an opportunity</button><button class="button button-outline" data-nav="admin/applications">${icon('file', 'icon-sm')} Review applications</button><div class="notice warning">Admin endpoints do not authenticate the operator. This workspace is suitable only for a local demo.</div></div><div class="section-heading"><div><h2>Placement statistics</h2><p>Offers can include multiple records per student.</p></div></div><div class="card card-pad">${placements.length ? `<div class="timeline">${placements.slice(0, 5).map((row) => `<div class="timeline-item"><span class="timeline-mark">${icon('award', 'icon-sm')}</span><div><div class="timeline-title">${esc(row.company_name)} · ${esc(row.opportunity_type)}</div><div class="timeline-copy">${esc(row.offer_count)} offers · average ${esc(money(row.average_compensation))}</div></div></div>`).join('')}</div>` : '<p class="small muted">Statistics will appear when selection creates offer records.</p>'}</div></aside></div>`;
+    return `<div class="page-head"><div><div class="eyebrow">PLACEMENT CELL</div><h1>Admin overview</h1><p class="page-subtitle">A live view of the opportunities and applications in CareerGrid.</p></div><span class="demo-ribbon">${icon('bell', 'icon-sm')} ADMIN · ID ${esc(state.userId)}</span></div>${failed ? retryPanel(results.filter((result) => result.status === 'rejected').map((result) => result.reason.message).join(' · '), 'Some report data is unavailable') : ''}
+      <div class="grid grid-4">${statCard('Opportunities', overview?.opportunity_count ?? '—', 'All records in CareerGrid', 'compass')}${statCard('Applications', overview?.application_count ?? '—', 'Across every opportunity', 'file')}${statCard('Offers', overview?.offer_count ?? '—', 'Placement records created', 'award')}${statCard('Joined', overview?.joined_count ?? '—', 'Students marked as joined', 'check')}</div>
+      <div class="dashboard-columns"><section><div class="section-heading"><div><h2>Application pipeline</h2><p>Current status counts from the database</p></div><button class="link-button" data-nav="admin/applications">Review applications ${icon('arrow', 'icon-sm')}</button></div><div class="card card-pad">${statuses === null ? retryPanel(results[1].reason.message, 'Application statistics unavailable') : statuses.length ? statuses.map((row) => `<div class="application-mini"><span class="job-title">${esc(row.status)}</span><span class="badge ${badgeClass(row.status)}">${esc(row.application_count)}</span><span class="mini-sub">Applications currently in this stage</span></div>`).join('') : emptyState('No applications yet', 'Application counts will appear when students apply.', 'file')}</div>
+      <div class="section-heading"><div><h2>Offers by company</h2><p>Offer counts and disclosed compensation</p></div></div><div class="card table-card">${placements === null ? retryPanel(results[2].reason.message, 'Placement statistics unavailable') : `<div class="table-wrap"><table><thead><tr><th>Company</th><th>Type</th><th>Offers</th><th>Average compensation</th></tr></thead><tbody>${placements.length ? placements.map((row) => `<tr><td><strong>${esc(row.company_name)}</strong></td><td>${esc(row.opportunity_type)}</td><td>${esc(row.offer_count)}</td><td>${esc(money(row.average_compensation))}</td></tr>`).join('') : '<tr><td colspan="4" class="muted">No offer statistics yet.</td></tr>'}</tbody></table></div>`}</div></section>
+      <aside><div class="section-heading"><div><h2>Quick actions</h2><p>Manage the recruitment cycle</p></div></div><div class="card card-pad form-stack"><button class="button" data-nav="admin/companies">${icon('plus', 'icon-sm')} Manage companies</button><button class="button button-outline" data-nav="admin/opportunities">${icon('plus', 'icon-sm')} Create an opportunity</button><button class="button button-outline" data-nav="admin/applications">${icon('file', 'icon-sm')} Review applications</button><div class="notice warning">Administrator actions are checked by the backend for this signed-in account.</div></div><div class="section-heading"><div><h2>Placement statistics</h2><p>Offers can include multiple records per student.</p></div></div><div class="card card-pad">${placements === null ? retryPanel(results[2].reason.message, 'Placement statistics unavailable') : placements.length ? `<div class="timeline">${placements.slice(0, 5).map((row) => `<div class="timeline-item"><span class="timeline-mark">${icon('award', 'icon-sm')}</span><div><div class="timeline-title">${esc(row.company_name)} · ${esc(row.opportunity_type)}</div><div class="timeline-copy">${esc(row.offer_count)} offers · average ${esc(money(row.average_compensation))}</div></div></div>`).join('')}</div>` : '<p class="small muted">Statistics will appear when selection creates offer records.</p>'}</div></aside></div>`;
+  }
+
+  async function adminCompaniesPage() {
+    let companies = null;
+    let error = '';
+    try { companies = await api('/admin/companies'); } catch (err) { error = err.message; }
+    return `<div class="page-head"><div><div class="eyebrow">COMPANY MANAGEMENT</div><h1>Companies</h1><p class="page-subtitle">Maintain company contact details used by opportunities.</p></div><button class="button" data-action="create-company">${icon('plus', 'icon-sm')} Add company</button></div>${error ? retryPanel(error, 'Companies unavailable') : ''}<section class="card table-card"><div class="table-card-head"><div><h2 style="margin:0 0 3px">Company records</h2><p class="small muted" style="margin:0">${companies?.length ?? '—'} total</p></div></div>${companies === null ? '' : companies.length ? `<div class="table-wrap"><table><thead><tr><th>Company</th><th>Industry</th><th>Location</th><th>Contact</th><th>Website</th><th></th></tr></thead><tbody>${companies.map((company) => `<tr><td><strong>${esc(company.company_name)}</strong><div class="tiny muted">#${Number(company.company_id)}</div></td><td>${esc(company.industry || '—')}</td><td>${esc(company.location || '—')}</td><td>${esc(company.contact_email || '—')}</td><td>${esc(company.website || '—')}</td><td><button class="button button-outline button-sm" data-action="edit-company" data-id="${Number(company.company_id)}">Edit</button></td></tr>`).join('')}</tbody></table></div>` : emptyState('No companies yet', 'Add a company before creating opportunities.', 'user')}</section><p class="small muted">Company deletion is unavailable to preserve historical opportunity and application records.</p>`;
+  }
+
+  async function adminStudentsPage() {
+    let students = null;
+    let error = '';
+    try { students = await api('/admin/students'); } catch (err) { error = err.message; }
+    return `<div class="page-head"><div><div class="eyebrow">STUDENT ACCOUNTS</div><h1>Students</h1><p class="page-subtitle">Review student registrations before enabling sign-in.</p></div></div>${error ? retryPanel(error, 'Student accounts unavailable') : ''}<section class="card table-card"><div class="table-card-head"><div><h2 style="margin:0 0 3px">Student accounts</h2><p class="small muted" style="margin:0">${students?.length ?? '—'} total</p></div></div>${students === null ? '' : students.length ? `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Roll number</th><th>Email</th><th>Department</th><th>Graduation</th><th>Account</th><th></th></tr></thead><tbody>${students.map((student) => `<tr><td><strong>${esc(student.full_name)}</strong><div class="tiny muted">#${Number(student.student_id)}</div></td><td>${esc(student.roll_no)}</td><td>${esc(student.email)}</td><td>${esc(student.department)}</td><td>${esc(student.graduation_year)}</td><td>${student.is_active ? '<span class="badge green">Active</span>' : '<span class="badge amber">Pending review</span>'}</td><td>${student.is_active ? '' : `<button class="button button-outline button-sm" data-action="activate-student" data-id="${Number(student.student_id)}">Approve</button>`}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No student accounts', 'Student accounts will appear here.', 'user')}</section>`;
   }
 
   async function adminOpportunitiesPage() {
@@ -307,7 +339,7 @@
     else loadError = results[1].reason.message;
     return `<div class="page-head"><div><div class="eyebrow">OPPORTUNITY MANAGEMENT</div><h1>Roles & openings</h1><p class="page-subtitle">Create openings and update opportunities across every status.</p></div><button class="button" data-action="create-opportunity">${icon('plus', 'icon-sm')} New opportunity</button></div>${loadError ? `<div class="notice warning">${esc(loadError)}</div>` : ''}
       <section class="card table-card"><div class="table-card-head"><div><h2 style="margin:0 0 3px">All opportunities</h2><p class="small muted" style="margin:0">${rows.length} total records</p></div></div>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Role</th><th>Company</th><th>Type</th><th>Status</th><th>Location</th><th>Deadline</th><th>Eligibility</th><th></th></tr></thead><tbody>${rows.map((job) => `<tr><td><strong>${esc(job.title)}</strong><div class="tiny muted">#${esc(job.opportunity_id)}</div></td><td>${esc(job.company_name)}</td><td>${esc(job.opportunity_type)}</td><td>${badge(job.status)}</td><td>${esc(job.location || '—')}</td><td>${esc(dateFormat(job.deadline))}</td><td>${job.minimum_cgpa == null ? '—' : `${esc(job.minimum_cgpa)}+`}</td><td><button class="button button-outline button-sm" data-action="edit-opportunity" data-id="${Number(job.opportunity_id)}">Edit</button></td></tr>`).join('')}</tbody></table></div>` : loadError ? '' : emptyState('No opportunities yet', 'Create an opportunity record to get started. The database will validate company and administrator references.', 'compass', 'Create opportunity', '')}</section>
-      <div class="notice" style="margin-top:14px">Company choices come directly from <code>GET /api/admin/companies</code>. To create an opportunity, the existing API requires the operator’s admin ID and the existing database must contain that admin.</div>`;
+      <div class="notice" style="margin-top:14px">Company choices come directly from <code>GET /api/admin/companies</code>. The signed administrator session identifies the operator when an opportunity is created.</div>`;
   }
 
   async function adminApplicationsPage() {
@@ -337,7 +369,7 @@
     if (!state.role) { go('welcome'); return; }
     if (studentOnly.includes(route) && state.role !== 'student') { go('admin'); return; }
     if (route.startsWith('admin') && state.role !== 'admin') { go('dashboard'); return; }
-    if (!['dashboard', 'opportunities', 'applications', 'interviews', 'placements', 'profile', 'admin', 'admin/opportunities', 'admin/applications', 'admin-opportunities', 'admin-applications'].includes(route)) { go(state.role === 'admin' ? 'admin' : 'dashboard'); return; }
+    if (!['dashboard', 'opportunities', 'applications', 'interviews', 'placements', 'profile', 'admin', 'admin/students', 'admin/companies', 'admin/opportunities', 'admin/applications', 'admin-opportunities', 'admin-applications'].includes(route)) { go(state.role === 'admin' ? 'admin' : 'dashboard'); return; }
 
     const token = ++state.requestNumber;
     const admin = state.role === 'admin';
@@ -353,6 +385,8 @@
       else if (route === 'placements') { title = 'Offers & placements'; content = await placementsPage(); }
       else if (route === 'profile') { title = 'My profile'; content = await profilePage(); }
       else if (route === 'admin') { title = 'Admin overview'; content = await adminDashboardPage(); }
+      else if (route === 'admin/students') { title = 'Students'; content = await adminStudentsPage(); }
+      else if (route === 'admin/companies') { title = 'Companies'; content = await adminCompaniesPage(); }
       else if (route === 'admin/opportunities' || route === 'admin-opportunities') { title = 'Roles & openings'; content = await adminOpportunitiesPage(); }
       else if (route === 'admin/applications' || route === 'admin-applications') { title = 'Applications'; content = await adminApplicationsPage(); }
     } catch (error) {
@@ -429,12 +463,11 @@
     const job = editJob || {};
     const isEdit = Boolean(editJob);
     const companyOptions = companies.map((company) => `<option value="${Number(company.company_id)}" ${Number(job.company_id) === Number(company.company_id) ? 'selected' : ''}>${esc(company.company_name)} · #${esc(company.company_id)}</option>`).join('');
-    const body = `<div class="form-grid"><div class="field"><label>Company</label><select class="select" name="company_id" required ${isEdit ? 'disabled' : ''}>${isEdit ? '' : '<option value="">Choose a company</option>'}${companyOptions}</select>${isEdit ? `<input type="hidden" name="company_id" value="${Number(job.company_id)}">` : ''}</div><div class="field"><label>Created by admin ID</label><input class="input" name="created_by_admin_id" type="number" min="1" value="${esc(isEdit ? job.created_by_admin_id : state.adminId)}" required ${isEdit ? 'readonly' : ''}><span class="form-help">This ID is not authenticated by the API.</span></div><div class="field span-2"><label>Role title</label><input class="input" name="title" maxlength="150" value="${esc(job.title)}" required></div><div class="field"><label>Opportunity type</label><select class="select" name="opportunity_type" required><option ${job.opportunity_type === 'Internship' ? 'selected' : ''}>Internship</option><option ${job.opportunity_type === 'Placement' ? 'selected' : ''}>Placement</option></select></div><div class="field"><label>Status</label><select class="select" name="status">${['Draft', 'Open', 'Closed', 'Cancelled'].map((status) => `<option ${job.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></div><div class="field"><label>Location</label><input class="input" name="location" maxlength="120" value="${esc(job.location)}"></div><div class="field"><label>Minimum CGPA</label><input class="input" name="minimum_cgpa" type="number" min="0" max="10" step="0.01" value="${esc(job.minimum_cgpa ?? '')}"></div><div class="field"><label>Internship stipend</label><input class="input" name="stipend" type="number" min="0" step="0.01" value="${esc(job.stipend ?? '')}" placeholder="Internship only"></div><div class="field"><label>Placement salary</label><input class="input" name="salary" type="number" min="0" step="0.01" value="${esc(job.salary ?? '')}" placeholder="Placement only"></div><div class="field"><label>Application opens</label><input class="input" name="open_date" type="datetime-local" step="1" value="${esc(dateTimeInput(job.open_date))}" required></div><div class="field"><label>Application deadline</label><input class="input" name="deadline" type="datetime-local" step="1" value="${esc(dateTimeInput(job.deadline))}" required></div><div class="field span-2"><label>Description</label><textarea class="textarea" name="description" maxlength="65535">${esc(job.description)}</textarea></div></div>`;
+    const body = `<div class="form-grid"><div class="field"><label>Company</label><select class="select" name="company_id" required ${isEdit ? 'disabled' : ''}>${isEdit ? '' : '<option value="">Choose a company</option>'}${companyOptions}</select>${isEdit ? `<input type="hidden" name="company_id" value="${Number(job.company_id)}">` : ''}</div><div class="field span-2"><label>Role title</label><input class="input" name="title" maxlength="150" value="${esc(job.title)}" required></div><div class="field"><label>Opportunity type</label><select class="select" name="opportunity_type" required><option ${job.opportunity_type === 'Internship' ? 'selected' : ''}>Internship</option><option ${job.opportunity_type === 'Placement' ? 'selected' : ''}>Placement</option></select></div><div class="field"><label>Status</label><select class="select" name="status">${['Draft', 'Open', 'Closed', 'Cancelled'].map((status) => `<option ${job.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></div><div class="field"><label>Location</label><input class="input" name="location" maxlength="120" value="${esc(job.location)}"></div><div class="field"><label>Minimum CGPA</label><input class="input" name="minimum_cgpa" type="number" min="0" max="10" step="0.01" value="${esc(job.minimum_cgpa ?? '')}"></div><div class="field"><label>Internship stipend</label><input class="input" name="stipend" type="number" min="0" step="0.01" value="${esc(job.stipend ?? '')}" placeholder="Internship only"></div><div class="field"><label>Placement salary</label><input class="input" name="salary" type="number" min="0" step="0.01" value="${esc(job.salary ?? '')}" placeholder="Placement only"></div><div class="field"><label>Application opens</label><input class="input" name="open_date" type="datetime-local" step="1" value="${esc(dateTimeInput(job.open_date))}" required></div><div class="field"><label>Application deadline</label><input class="input" name="deadline" type="datetime-local" step="1" value="${esc(dateTimeInput(job.deadline))}" required></div><div class="field span-2"><label>Description</label><textarea class="textarea" name="description" maxlength="65535">${esc(job.description)}</textarea></div></div>`;
     showModal(isEdit ? 'Edit opportunity' : 'Create opportunity', body, async (form, modal) => {
       const nullable = (name) => form.get(name) === '' ? null : form.get(name);
       const payload = {
         company_id: Number(form.get('company_id')),
-        created_by_admin_id: Number(form.get('created_by_admin_id')),
         title: form.get('title').trim(), opportunity_type: form.get('opportunity_type'), status: form.get('status'),
         location: nullable('location'), description: nullable('description'), minimum_cgpa: nullable('minimum_cgpa'),
         stipend: nullable('stipend'), salary: nullable('salary'),
@@ -445,6 +478,26 @@
       });
       modal.remove(); toast(isEdit ? 'Opportunity updated.' : 'Opportunity created.'); render();
     }, isEdit ? 'Save opportunity' : 'Create opportunity');
+  }
+
+  function companyModal(company = null) {
+    const edit = Boolean(company);
+    const body = `<div class="form-stack"><div class="field"><label>Company name</label><input class="input" name="company_name" maxlength="150" value="${esc(company?.company_name || '')}" required></div><div class="field"><label>Website <span class="muted">(optional)</span></label><input class="input" name="website" type="url" maxlength="255" value="${esc(company?.website || '')}" placeholder="https://example.com"></div><div class="field"><label>Industry <span class="muted">(optional)</span></label><input class="input" name="industry" maxlength="80" value="${esc(company?.industry || '')}"></div><div class="field"><label>Location <span class="muted">(optional)</span></label><input class="input" name="location" maxlength="120" value="${esc(company?.location || '')}"></div><div class="field"><label>Contact email <span class="muted">(optional)</span></label><input class="input" name="contact_email" type="email" maxlength="254" value="${esc(company?.contact_email || '')}"></div></div>`;
+    showModal(edit ? 'Edit company' : 'Add company', body, async (form, modal) => {
+      const payload = Object.fromEntries(['company_name', 'website', 'industry', 'location', 'contact_email'].map((key) => [key, form.get(key).trim() || null]));
+      await api(edit ? `/admin/companies/${encodeURIComponent(company.company_id)}` : '/admin/companies', {
+        method: edit ? 'PUT' : 'POST', body: JSON.stringify(payload),
+      });
+      modal.remove(); toast(edit ? 'Company updated.' : 'Company added.'); render();
+    }, edit ? 'Save company' : 'Add company');
+  }
+
+  async function editCompany(id) {
+    try {
+      const company = (await api('/admin/companies')).find((item) => Number(item.company_id) === Number(id));
+      if (!company) throw new Error('Company not found. Refresh the list and try again.');
+      companyModal(company);
+    } catch (error) { toast(error.message, 'error'); }
   }
 
   async function editOpportunity(id) {
@@ -462,10 +515,11 @@
   async function manageApplication(id, studentId, status, title) {
     let interviews = [];
     let loadError = '';
-    try { interviews = await api(`/students/${encodeURIComponent(studentId)}/interviews`); interviews = interviews.filter((item) => Number(item.application_id) === Number(id)); }
+    try { interviews = await api(`/admin/applications/${encodeURIComponent(id)}/interviews`); interviews = interviews.filter((item) => Number(item.application_id) === Number(id)); }
     catch (error) { loadError = error.message; }
     const appInterviews = interviews.map((item) => `<div class="application-mini"><span class="job-title">Round ${esc(item.round_number)} · ${esc(timeFormat(item.scheduled_at))}</span>${item.result ? badge(item.result) : badge('Scheduled')}<span class="mini-sub">${esc(item.mode)}${item.feedback ? ` · ${esc(item.feedback)}` : ''}</span><button class="button button-quiet button-sm" style="grid-column:1/-1;justify-self:start" data-action="edit-interview" data-id="${Number(item.interview_id)}" data-result="${esc(item.result || '')}" data-feedback="${esc(item.feedback || '')}">Record result / feedback</button></div>`).join('');
-    const body = `<div class="notice" style="margin-bottom:14px"><strong>${esc(title)}</strong> · Application #${esc(id)}<br>Student #${esc(studentId)}</div><div class="form-stack"><div class="field"><label>Application status</label><select class="select" name="status">${['Applied', 'Under Review', 'Shortlisted', 'Interview', 'Selected', 'Rejected', 'Withdrawn'].map((option) => `<option ${status === option ? 'selected' : ''}>${option}</option>`).join('')}</select><span class="form-help">Changing status to Selected invokes the existing placement-creation trigger.</span></div><div class="field"><label>Administrator remarks</label><textarea class="textarea" name="remarks" maxlength="500" placeholder="Optional note for the application record"></textarea></div><div class="section-heading"><div><h3>Interview rounds</h3><p>Schedule a round or update a result.</p></div></div>${loadError ? `<div class="notice warning">${esc(loadError)}</div>` : appInterviews || '<p class="small muted">No rounds scheduled yet.</p>'}<div class="notice">Student interview records are visible via the student API. This local demo can use them to show the rounds associated with this application.</div></div>`;
+    const statusOptions = [status, ...(applicationNext[status] || [])];
+    const body = `<div class="notice" style="margin-bottom:14px"><strong>${esc(title)}</strong> · Application #${esc(id)}<br>Student #${esc(studentId)}</div><div class="form-stack"><div class="field"><label>Application status</label><select class="select" name="status">${statusOptions.map((option) => `<option ${status === option ? 'selected' : ''}>${option}</option>`).join('')}</select><span class="form-help">Selected creates its pending offer record. Selected, Rejected and Withdrawn are final statuses.</span></div><div class="field"><label>Administrator remarks</label><textarea class="textarea" name="remarks" maxlength="500" placeholder="Optional note for the application record"></textarea></div><div class="section-heading"><div><h3>Interview rounds</h3><p>Schedule a round or update a result.</p></div></div>${loadError ? `<div class="notice warning">${esc(loadError)}</div>` : appInterviews || '<p class="small muted">No rounds scheduled yet.</p>'}<div class="notice">Student interview records are visible via the student API. This local demo can use them to show the rounds associated with this application.</div></div>`;
     showModal('Manage application', body, async (form, modal) => {
       const update = { status: form.get('status') };
       if (form.get('remarks')) update.remarks = form.get('remarks');
@@ -492,10 +546,14 @@
     }, 'Schedule round');
   }
 
-  function signOut() {
-    state.role = ''; state.studentId = ''; state.adminId = ''; state.student = null;
-    sessionStorage.removeItem('cgRole'); sessionStorage.removeItem('cgStudentId'); sessionStorage.removeItem('cgAdminId');
-    go('welcome');
+  async function signOut() {
+    try {
+      await api('/auth/logout', { method: 'POST', body: '{}' });
+      state.role = ''; state.studentId = ''; state.userId = null; state.student = null;
+      const session = await api('/auth/session');
+      state.csrfToken = session.csrf_token;
+      go('welcome');
+    } catch (error) { toast(error.message, 'error'); }
   }
 
   async function handleClick(event) {
@@ -527,6 +585,12 @@
       try { await api(`/students/${encodeURIComponent(state.studentId)}/skills/${encodeURIComponent(button.dataset.id)}`, { method: 'DELETE' }); toast('Skill removed.'); render(); }
       catch (error) { toast(error.message, 'error'); }
     } else if (action === 'create-opportunity') createOpportunity();
+    else if (action === 'create-company') companyModal();
+    else if (action === 'edit-company') editCompany(button.dataset.id);
+    else if (action === 'activate-student') {
+      try { await api(`/admin/students/${encodeURIComponent(button.dataset.id)}/activate`, { method: 'POST', body: '{}' }); toast('Student account approved.'); render(); }
+      catch (error) { toast(error.message, 'error'); }
+    }
     else if (action === 'edit-opportunity') editOpportunity(button.dataset.id);
     else if (action === 'manage-application') manageApplication(button.dataset.id, button.dataset.student, button.dataset.status, button.dataset.title);
     else if (action === 'edit-interview') interviewModal(button.dataset.id, button.dataset.result, button.dataset.feedback);
@@ -534,26 +598,44 @@
     else if (action === 'close-modal') button.closest('.modal-backdrop')?.remove();
   }
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     const form = event.target;
-    if (form.id === 'student-access-form') {
+    if (form.id === 'student-registration-form') {
       event.preventDefault();
       const button = form.querySelector('[type="submit"]');
-      const studentId = form.elements.student_id.value.trim();
-      if (!/^\d+$/.test(studentId) || Number(studentId) < 1) { toast('Enter a valid Student ID.', 'error'); return; }
-      setBusy(button, true, 'Checking your profile…');
-      api(`/students/${encodeURIComponent(studentId)}`).then((student) => {
-        state.role = 'student'; state.studentId = studentId; state.student = student;
-        sessionStorage.setItem('cgRole', state.role); sessionStorage.setItem('cgStudentId', studentId);
-        toast(`Welcome, ${student.full_name.split(' ')[0]}.`); go('dashboard');
-      }).catch((error) => { setBusy(button, false); toast(error.status === 404 ? 'No student record was found for that ID.' : error.message, 'error'); });
-    } else if (form.id === 'admin-access-form') {
+      const values = new FormData(form);
+      const payload = Object.fromEntries(values.entries());
+      payload.graduation_year = Number(payload.graduation_year);
+      payload.date_of_birth = payload.date_of_birth || null;
+      payload.cgpa = payload.cgpa === '' ? null : Number(payload.cgpa);
+      setBusy(button, true, 'Creating account…');
+      try {
+        const result = await api('/auth/register', { method: 'POST', body: JSON.stringify(payload) });
+        toast(result.approval_required ? 'Registration received. Sign-in will be available after the placement administrator approves your account.' : 'Registration complete.');
+        state.accessRole = 'student'; app.innerHTML = welcomePage();
+      } catch (error) { setBusy(button, false); toast(error.message, 'error'); }
+    } else if (form.id === 'student-access-form' || form.id === 'admin-access-form') {
       event.preventDefault();
-      const adminId = form.elements.admin_id.value.trim();
-      if (!/^\d+$/.test(adminId) || Number(adminId) < 1) { toast('Enter a valid placement admin ID.', 'error'); return; }
-      state.role = 'admin'; state.adminId = adminId;
-      sessionStorage.setItem('cgRole', 'admin'); sessionStorage.setItem('cgAdminId', adminId);
-      toast('Opening local demo workspace.', 'info'); go('admin');
+      const button = form.querySelector('[type="submit"]');
+      if (button.disabled) return;
+      setBusy(button, true, 'Signing in…');
+      try {
+        const role = form.id === 'student-access-form' ? 'student' : 'admin';
+        const identity = await api(`/auth/${role}/login`, {
+          method: 'POST',
+          body: JSON.stringify({ identifier: form.elements.identifier.value.trim(), password: form.elements.password.value }),
+        });
+        state.role = identity.role;
+        state.userId = identity.user_id;
+        state.studentId = identity.role === 'student' ? String(identity.user_id) : '';
+        state.student = identity.role === 'student' ? { full_name: identity.display_name } : null;
+        state.csrfToken = identity.csrf_token;
+        toast(`Welcome, ${identity.display_name.split(' ')[0]}.`);
+        go(identity.role === 'admin' ? 'admin' : 'dashboard');
+      } catch (error) {
+        setBusy(button, false);
+        toast(error.message, 'error');
+      }
     } else if (form.id === 'profile-form') {
       event.preventDefault();
       const button = form.querySelector('[type="submit"]');
@@ -625,6 +707,17 @@
   });
   window.addEventListener('hashchange', render);
 
-  if (state.role === 'student' && state.studentId) loadStudent();
-  render();
+  async function restoreSession() {
+    try {
+      const current = await api('/auth/session');
+      state.csrfToken = current.csrf_token;
+      if (current.authenticated) {
+        state.role = current.role; state.userId = current.user_id;
+        state.studentId = current.role === 'student' ? String(current.user_id) : '';
+        state.student = current.role === 'student' ? { full_name: current.display_name } : null;
+      }
+    } catch (error) { toast(error.message, 'error'); }
+    render();
+  }
+  restoreSession();
 })();

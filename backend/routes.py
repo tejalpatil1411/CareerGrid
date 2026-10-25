@@ -2,9 +2,10 @@
 
 from datetime import datetime
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 import mysql.connector
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 
 from .db import connect_db, execute, fetch_all, fetch_one
 from .validation import (
@@ -21,6 +22,19 @@ PLACEMENT_STATUSES = ("Offer Pending", "Accepted", "Declined", "Joined", "Withdr
 OPPORTUNITY_TYPES = ("Internship", "Placement")
 OPPORTUNITY_STATUSES = ("Draft", "Open", "Closed", "Cancelled")
 PROFICIENCY_LEVELS = ("Beginner", "Intermediate", "Advanced")
+
+APPLICATION_TRANSITIONS = {
+    "Applied": {"Under Review", "Shortlisted", "Interview", "Selected", "Rejected", "Withdrawn"},
+    "Under Review": {"Shortlisted", "Interview", "Selected", "Rejected", "Withdrawn"},
+    "Shortlisted": {"Interview", "Selected", "Rejected", "Withdrawn"},
+    "Interview": {"Shortlisted", "Selected", "Rejected", "Withdrawn"},
+    "Selected": set(), "Rejected": set(), "Withdrawn": set(),
+}
+PLACEMENT_TRANSITIONS = {
+    "Offer Pending": {"Accepted", "Declined", "Withdrawn"},
+    "Accepted": {"Joined", "Withdrawn"},
+    "Declined": set(), "Joined": set(), "Withdrawn": set(),
+}
 
 
 def success(data, status=200):
@@ -45,6 +59,45 @@ def enum_value(value, name, choices):
     if value not in choices:
         raise ValidationError(f"{name} must be one of: {', '.join(choices)}.")
     return value
+
+
+def transition_error(current, target, transitions, label):
+    if target != current and target not in transitions.get(current, set()):
+        return jsonify({"success": False, "data": None, "error": {
+            "code": "invalid_state_transition",
+            "message": f"{label} cannot change from {current} to {target}.",
+        }}), 409
+    return None
+
+
+def company_values(body, *, partial=False):
+    allowed = {"company_name", "website", "industry", "location", "contact_email"}
+    if set(body) - allowed or (not partial and "company_name" not in body):
+        raise ValidationError("Provide supported company fields only, including company_name.")
+    values = {}
+    for key, value in body.items():
+        if key == "company_name":
+            values[key] = required_text({key: value}, key, 150)
+        elif key == "website":
+            website = optional_text({key: value}, key, 255)
+            if website:
+                try:
+                    parsed = urlsplit(website)
+                    valid = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ValidationError("website must be a valid HTTP or HTTPS URL.")
+            values[key] = website
+        elif key == "industry":
+            values[key] = optional_text({key: value}, key, 80)
+        elif key == "location":
+            values[key] = optional_text({key: value}, key, 120)
+        elif key == "contact_email":
+            values[key] = email_value(value, optional=True) if value not in (None, "") else None
+    if not partial and not values.get("company_name"):
+        raise ValidationError("company_name is required.")
+    return values
 
 
 @api.get("/health")
@@ -244,7 +297,13 @@ def withdraw_application(student_id, application_id):
         return missing("Application")
     if row["status"] in ("Selected", "Rejected", "Withdrawn"):
         return jsonify({"success": False, "data": None, "error": {"code": "invalid_state", "message": "This application can no longer be withdrawn."}}), 409
-    execute("UPDATE APPLICATION SET status='Withdrawn' WHERE student_id=%s AND application_id=%s", (student_id, application_id))
+    result = execute(
+        "UPDATE APPLICATION SET status='Withdrawn' WHERE student_id=%s AND application_id=%s AND status=%s",
+        (student_id, application_id, row["status"]),
+    )
+    if not result["rowcount"]:
+        return jsonify({"success": False, "data": None, "error": {
+            "code": "concurrent_state_change", "message": "The application changed while you were withdrawing it. Refresh and try again."}}), 409
     return success({"application_id": application_id, "status": "Withdrawn"})
 
 
@@ -286,26 +345,77 @@ def update_student_placement(student_id, placement_id):
     if set(body) - {"placement_status"} or "placement_status" not in body:
         raise ValidationError("Provide placement_status only.")
     state = enum_value(body["placement_status"], "placement_status", PLACEMENT_STATUSES)
+    current = fetch_one(
+        "SELECT p.placement_status FROM PLACEMENT p JOIN APPLICATION a ON a.application_id=p.application_id "
+        "WHERE p.placement_id=%s AND a.student_id=%s", (placement_id, student_id),
+    )
+    if current is None:
+        return missing("Placement")
+    invalid = transition_error(current["placement_status"], state, PLACEMENT_TRANSITIONS, "Offer")
+    if invalid:
+        return invalid
+    if state == current["placement_status"]:
+        return success({"placement_id": placement_id, "placement_status": state})
     result = execute(
         "UPDATE PLACEMENT p JOIN APPLICATION a ON a.application_id=p.application_id "
-        "SET p.placement_status=%s WHERE p.placement_id=%s AND a.student_id=%s",
-        (state, placement_id, student_id),
+        "SET p.placement_status=%s WHERE p.placement_id=%s AND a.student_id=%s AND p.placement_status=%s",
+        (state, placement_id, student_id, current["placement_status"]),
     )
     if not result["rowcount"]:
-        return missing("Placement")
+        return jsonify({"success": False, "data": None, "error": {
+            "code": "concurrent_state_change", "message": "The offer changed while you were updating it. Refresh and try again."}}), 409
     return success({"placement_id": placement_id, "placement_status": state})
 
 
 # Admin management ----------------------------------------------------------
 @api.get("/admin/students")
 def admin_students():
-    rows = fetch_all("SELECT student_id, roll_no, full_name, email, department, graduation_year, cgpa FROM STUDENT ORDER BY student_id")
+    rows = fetch_all("SELECT student_id, roll_no, full_name, email, department, graduation_year, cgpa, is_active FROM STUDENT ORDER BY student_id")
     return success(rows)
+
+
+@api.post("/admin/students/<int:student_id>/activate")
+def activate_student(student_id):
+    student_id = positive_id(student_id, "student_id")
+    result = execute("UPDATE STUDENT SET is_active=TRUE WHERE student_id=%s", (student_id,))
+    if not result["rowcount"] and fetch_one("SELECT student_id FROM STUDENT WHERE student_id=%s", (student_id,)) is None:
+        return missing("Student")
+    return success({"student_id": student_id, "is_active": True})
 
 
 @api.get("/admin/companies")
 def admin_companies():
     return success(fetch_all("SELECT company_id, company_name, website, industry, location, contact_email FROM COMPANY ORDER BY company_name, company_id"))
+
+
+@api.post("/admin/companies")
+def create_company():
+    body = json_body()
+    values = company_values(body)
+    result = execute(
+        "INSERT INTO COMPANY (company_name, website, industry, location, contact_email) VALUES (%s,%s,%s,%s,%s)",
+        tuple(values.get(key) for key in ("company_name", "website", "industry", "location", "contact_email")),
+    )
+    row = fetch_one("SELECT company_id, company_name, website, industry, location, contact_email FROM COMPANY WHERE company_id=%s",
+                    (result["lastrowid"],))
+    return success(row, 201)
+
+
+@api.put("/admin/companies/<int:company_id>")
+def update_company(company_id):
+    company_id = positive_id(company_id, "company_id")
+    body = json_body()
+    values = company_values(body, partial=True)
+    if not values:
+        raise ValidationError("Provide one or more supported company fields.")
+    assignments = ", ".join(f"{key}=%s" for key in values)
+    result = execute(f"UPDATE COMPANY SET {assignments} WHERE company_id=%s", (*values.values(), company_id))
+    if not result["rowcount"] and fetch_one("SELECT company_id FROM COMPANY WHERE company_id=%s", (company_id,)) is None:
+        return missing("Company")
+    return success(fetch_one(
+        "SELECT company_id, company_name, website, industry, location, contact_email FROM COMPANY WHERE company_id=%s",
+        (company_id,),
+    ))
 
 
 @api.get("/admin/opportunities")
@@ -338,14 +448,27 @@ def admin_applications():
     return success(fetch_all(sql, tuple(values)))
 
 
+@api.get("/admin/applications/<int:application_id>/interviews")
+def admin_application_interviews(application_id):
+    application_id = positive_id(application_id, "application_id")
+    rows = fetch_all(
+        "SELECT interview_id, application_id, round_number, "
+        "DATE_FORMAT(scheduled_at, '%Y-%m-%dT%H:%i:%S') AS scheduled_at, mode, result, feedback "
+        "FROM INTERVIEW WHERE application_id=%s ORDER BY round_number, scheduled_at",
+        (application_id,),
+    )
+    return success(rows)
+
+
 @api.post("/admin/opportunities")
 def create_opportunity():
     body = json_body()
-    allowed = {"company_id", "created_by_admin_id", "title", "opportunity_type", "description", "location", "stipend", "salary", "minimum_cgpa", "open_date", "deadline", "status"}
+    allowed = {"company_id", "title", "opportunity_type", "description", "location", "stipend", "salary", "minimum_cgpa", "open_date", "deadline", "status"}
     if set(body) - allowed:
         raise ValidationError("Request contains unsupported opportunity fields.")
     company_id = positive_id(body.get("company_id"), "company_id")
-    admin_id = positive_id(body.get("created_by_admin_id"), "created_by_admin_id")
+    # Ownership comes from the authenticated cookie session, never a browser-supplied ID.
+    admin_id = int(session["user_id"])
     title = required_text(body, "title", 150)
     opportunity_type = enum_value(body.get("opportunity_type"), "opportunity_type", OPPORTUNITY_TYPES)
     status = enum_value(body.get("status", "Draft"), "status", OPPORTUNITY_STATUSES)
@@ -375,7 +498,7 @@ def update_opportunity(opportunity_id):
     if current is None:
         return missing("Opportunity")
     body = json_body()
-    allowed = {"company_id", "created_by_admin_id", "title", "opportunity_type", "description", "location", "stipend", "salary", "minimum_cgpa", "open_date", "deadline", "status"}
+    allowed = {"company_id", "title", "opportunity_type", "description", "location", "stipend", "salary", "minimum_cgpa", "open_date", "deadline", "status"}
     if not body or set(body) - allowed:
         raise ValidationError("Provide one or more supported opportunity fields only.")
     values, assignments = [], []
@@ -421,15 +544,33 @@ def admin_update_application(application_id):
         raise ValidationError("Provide status and/or remarks only.")
     assignments, values = [], []
     if "status" in body:
-        assignments.append("status=%s")
-        values.append(enum_value(body["status"], "status", APPLICATION_STATUSES))
+        target = enum_value(body["status"], "status", APPLICATION_STATUSES)
+        current = fetch_one("SELECT status FROM APPLICATION WHERE application_id=%s", (application_id,))
+        if current is None:
+            return missing("Application")
+        invalid = transition_error(current["status"], target, APPLICATION_TRANSITIONS, "Application")
+        if invalid:
+            return invalid
+        if target != current["status"]:
+            assignments.append("status=%s")
+            values.append(target)
     if "remarks" in body:
         assignments.append("remarks=%s")
         values.append(optional_text(body, "remarks", 500))
+    if not assignments:
+        return success(fetch_one("SELECT * FROM APPLICATION WHERE application_id=%s", (application_id,)))
     values.append(application_id)
-    result = execute(f"UPDATE APPLICATION SET {', '.join(assignments)} WHERE application_id=%s", tuple(values))
+    if "status" in body:
+        values.append(current["status"])
+        where = "application_id=%s AND status=%s"
+    else:
+        where = "application_id=%s"
+    result = execute(f"UPDATE APPLICATION SET {', '.join(assignments)} WHERE {where}", tuple(values))
     if not result["rowcount"] and fetch_one("SELECT application_id FROM APPLICATION WHERE application_id=%s", (application_id,)) is None:
         return missing("Application")
+    if not result["rowcount"] and "status" in body and target != current["status"]:
+        return jsonify({"success": False, "data": None, "error": {
+            "code": "concurrent_state_change", "message": "The application changed while you were updating it. Refresh and try again."}}), 409
     row = fetch_one("SELECT * FROM APPLICATION WHERE application_id=%s", (application_id,))
     return success(row)
 

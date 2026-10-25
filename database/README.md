@@ -1,6 +1,6 @@
 # CareerGrid MySQL database files
 
-These files implement only the approved CareerGrid database. They do not contain Flask, Python, frontend, authentication, or API code. No SQL has been executed as part of preparing these files.
+These files implement the CareerGrid database. Authentication migrations add credential tables only; they do not contain Flask, Python, frontend, or API code. No SQL has been executed as part of preparing these files.
 
 ## MySQL version
 
@@ -16,6 +16,15 @@ The scripts use `utf8mb4_0900_ai_ci` when creating the database. That collation 
 4. **`04_sample_data.sql`** — Inserts the demonstration records. Application status updates near the end invoke the placement trigger.
 5. **`05_syllabus_queries.sql`** — Contains labeled DML, joins, aggregates, date/time, arithmetic, set-operation, subquery, and safe DDL practice examples. Some statements intentionally change a demo row; the delete example is rolled back. The DDL practice block is commented and targets a separate lab schema.
 6. **`06_dcl_tcl.sql`** — Contains role grants, optional commented user templates, a revoke example, and transaction/savepoint demonstrations. Run role management with a MySQL account authorized to create roles and grant privileges.
+7. **`07_auth.sql`** — Additively creates `ADMIN_CREDENTIALS` for password hashes; it does not add or reset administrator records.
+8. **`08_auth_student_credentials.sql`** — Additively creates `STUDENT_CREDENTIALS` for existing students. It does not create student accounts or passwords.
+9. **`09_student_registration_approval.sql`** — Adds `STUDENT.is_active` with a default of TRUE so existing students remain active. New registrations explicitly start inactive and require administrator approval. Run once after 08; it uses additive `ALTER TABLE` and preserves all existing rows.
+
+For a new demo database, run 01, 02, 03, then 04 once, followed by 07, 08 and 09. Scripts 05 and 06 are syllabus/lab exercises, not required by the app. On a populated database, do not rerun 01 or 04; inspect which auth scripts are already applied and run only missing additive migrations. Migration 09 is run once, not repeatedly.
+
+## Application authentication setup
+
+Run 07 if `ADMIN_CREDENTIALS` is absent, then 08 if `STUDENT_CREDENTIALS` is absent, and run 09 once. These steps preserve existing account and project rows; 09 makes existing student rows active through its default. Existing administrators and students receive hashes with `python -m backend.set_password`, which prompts for account type, an existing account identifier, and a new password without echo. New student registrations remain inactive until approved on the administrator Students page. No default passwords are installed. The backend/bootstrap database account needs read access to account tables and write access to credential tables; registration and approval also require writes to `STUDENT`.
 
 ## Running files in MySQL Workbench
 
@@ -25,7 +34,7 @@ The scripts use `utf8mb4_0900_ai_ci` when creating the database. That collation 
 4. In `05_syllabus_queries.sql`, execute query sections individually. The optional DDL demo is commented out. To demonstrate it, uncomment and run only that block in a dedicated disposable lab schema; it never targets the CareerGrid tables.
 5. `06_dcl_tcl.sql` requires elevated database-management privileges. User-creation statements are commented templates with a password placeholder; set credentials locally and do not save real credentials in this project. The role GRANT statements are active, while the REVOKE and role-cleanup examples are commented to avoid changing permissions unexpectedly.
 
-Run `04_sample_data.sql` once against a fresh schema. It uses fixed example IDs and is intentionally not a repeatable seed/reset script; rerunning it will encounter unique-key conflicts. No reset/drop script is provided because the design preserves historical data.
+Run `04_sample_data.sql` once only against a fresh schema. It uses fixed example IDs and is intentionally not a repeatable seed/reset script; rerunning it will encounter unique-key conflicts. No reset/drop script is provided because the design preserves historical data.
 
 ## Important assumptions
 

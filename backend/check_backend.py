@@ -8,8 +8,10 @@ and immediately rolls it back; no persistent data is changed.
 import json
 import os
 import sys
-from urllib.error import URLError
-from urllib.request import urlopen
+from getpass import getpass
+from http.cookiejar import CookieJar
+from urllib.error import HTTPError
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import mysql.connector
 
@@ -17,11 +19,32 @@ from .config import Config
 
 
 BASE_URL = os.getenv("CAREERGRID_API_URL", "http://127.0.0.1:5000")
+OPENER = build_opener(HTTPCookieProcessor(CookieJar()))
 
 
 def get_json(path):
-    with urlopen(BASE_URL + path, timeout=10) as response:
+    with OPENER.open(BASE_URL + path, timeout=10) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def login_admin():
+    _, session = get_json("/api/auth/session")
+    identifier = input("Placement administrator email: ").strip()
+    password = getpass("Placement administrator password: ")
+    request = Request(
+        BASE_URL + "/api/auth/admin/login",
+        data=json.dumps({"identifier": identifier, "password": password}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-CSRF-Token": session["data"]["csrf_token"]},
+        method="POST",
+    )
+    try:
+        with OPENER.open(request, timeout=10) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            return body.get("success") is True
+    except HTTPError as error:
+        body = json.loads(error.read().decode("utf-8"))
+        print(f"FAIL Administrator sign-in: {body.get('error', {}).get('message', 'Sign-in failed.')}")
+        return False
 
 
 def check_trigger():
@@ -54,6 +77,12 @@ def check_trigger():
 
 
 def main():
+    try:
+        if not login_admin():
+            return 1
+    except Exception as error:
+        print(f"FAIL Administrator sign-in: {error}")
+        return 1
     checks = [
         ("Flask health", "/api/health", lambda body: body.get("success") is True),
         ("MySQL connection", "/api/health/db", lambda body: body.get("data", {}).get("status") == "connected"),
