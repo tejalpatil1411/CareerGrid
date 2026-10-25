@@ -114,25 +114,28 @@
 
   function shell(content, pageTitle, active, role = state.role) {
     const admin = role === 'admin';
-    const name = admin ? 'Placement administrator' : (state.student?.full_name || `Student #${state.studentId}`);
+    const guest = !role;
+    const name = admin ? 'Placement administrator' : guest ? 'Guest' : (state.student?.full_name || `Student #${state.studentId}`);
     const mobileItems = admin
       ? [['admin', 'Home', 'grid'], ['admin/students', 'Students', 'user'], ['admin/companies', 'Companies', 'user'], ['admin/opportunities', 'Jobs', 'compass'], ['admin/applications', 'Apps', 'file']]
-      : [['dashboard', 'Home', 'grid'], ['opportunities', 'Explore', 'compass'], ['applications', 'Applied', 'file'], ['profile', 'Profile', 'user']];
+      : guest ? [['opportunities', 'Explore', 'compass']]
+        : [['dashboard', 'Home', 'grid'], ['opportunities', 'Explore', 'compass'], ['applications', 'Applied', 'file'], ['profile', 'Profile', 'user']];
     return `<div class="app-shell">
       <aside class="sidebar" id="sidebar">
-        <a class="brand" href="#/${admin ? 'admin' : 'dashboard'}"><span class="brand-mark">c</span><span>careergrid<small>Find your next step</small></span></a>
+        <a class="brand" href="#/${admin ? 'admin' : guest ? 'welcome' : 'dashboard'}"><span class="brand-mark">c</span><span>careergrid<small>Find your next step</small></span></a>
         <div class="nav-label">Workspace</div>
         <nav class="nav-list" aria-label="Main navigation">${admin
           ? navLink('admin', 'Overview', 'grid', active === 'admin') + navLink('admin/students', 'Students', 'user', active === 'admin/students') + navLink('admin/companies', 'Companies', 'user', active === 'admin/companies') + navLink('admin/opportunities', 'Opportunities', 'compass', active === 'admin/opportunities') + navLink('admin/applications', 'Applications & interviews', 'file', active === 'admin/applications')
-          : navLink('dashboard', 'Overview', 'grid', active === 'dashboard') + navLink('opportunities', 'Find opportunities', 'compass', active === 'opportunities') + navLink('applications', 'My applications', 'file', active === 'applications') + navLink('interviews', 'Interviews', 'chat', active === 'interviews') + navLink('placements', 'Offers & placements', 'award', active === 'placements') + navLink('profile', 'My profile', 'user', active === 'profile')}
+          : guest ? navLink('opportunities', 'Explore opportunities', 'compass', active === 'opportunities')
+            : navLink('dashboard', 'Overview', 'grid', active === 'dashboard') + navLink('opportunities', 'Find opportunities', 'compass', active === 'opportunities') + navLink('applications', 'My applications', 'file', active === 'applications') + navLink('interviews', 'Interviews', 'chat', active === 'interviews') + navLink('placements', 'Offers & placements', 'award', active === 'placements') + navLink('profile', 'My profile', 'user', active === 'profile')}
         </nav>
         <div class="sidebar-bottom">
-          ${admin ? '<div class="workspace-note"><strong><span class="dot"></span>Authenticated placement access</strong>Administrator actions require a signed-in account.</div>' : '<div class="workspace-note"><strong><span class="dot"></span>Live CareerGrid records</strong>Your opportunities and progress come from the existing CareerGrid API.</div>'}
-          <div class="sidebar-user"><span class="avatar">${esc(initials(name))}</span><span><span class="sidebar-user-name">${esc(name)}</span><span class="sidebar-user-meta">${admin ? `Admin ID ${esc(state.userId)}` : esc(state.student?.department || 'Student account')}</span></span><button class="logout" type="button" data-action="signout" title="Sign out">${icon('close')}</button></div>
+          ${guest ? '<div class="workspace-note"><strong><span class="dot"></span>Public opportunities</strong>Browse current roles from CareerGrid.</div>' : admin ? '<div class="workspace-note"><strong><span class="dot"></span>Authenticated placement access</strong>Administrator actions require a signed-in account.</div>' : '<div class="workspace-note"><strong><span class="dot"></span>Live CareerGrid records</strong>Your opportunities and progress come from the existing CareerGrid API.</div>'}
+          ${guest ? '<a class="button button-outline" style="width:100%;justify-content:center;margin-top:14px" href="#/access">Sign in</a>' : `<div class="sidebar-user"><span class="avatar">${esc(initials(name))}</span><span><span class="sidebar-user-name">${esc(name)}</span><span class="sidebar-user-meta">${admin ? `Admin ID ${esc(state.userId)}` : esc(state.student?.department || 'Student account')}</span></span><button class="logout" type="button" data-action="signout" title="Sign out">${icon('close')}</button></div>`}
         </div>
       </aside>
       <main class="main">
-        <header class="topbar"><div class="top-left"><button class="icon-button menu-toggle" data-action="menu" aria-label="Open menu">${icon('menu')}</button><span class="breadcrumb">${admin ? 'Admin workspace' : 'Student workspace'}&nbsp; / &nbsp;</span><span class="top-title">${esc(pageTitle)}</span></div><div class="top-actions"><span class="health-pill" id="health-pill"><span class="dot"></span>API connected</span><button class="icon-button" data-action="refresh" title="Refresh page data">${icon('spark')}</button></div></header>
+        <header class="topbar"><div class="top-left"><button class="icon-button menu-toggle" data-action="menu" aria-label="Open menu">${icon('menu')}</button><span class="breadcrumb">${admin ? 'Admin workspace' : guest ? 'Public CareerGrid' : 'Student workspace'}&nbsp; / &nbsp;</span><span class="top-title">${esc(pageTitle)}</span></div><div class="top-actions"><span class="health-pill" id="health-pill"><span class="dot"></span>API connected</span><button class="icon-button" data-action="refresh" title="Refresh page data">${icon('spark')}</button></div></header>
         <section class="content" id="page-content">${content}</section>
       </main>
       <nav class="mobile-nav" aria-label="Mobile navigation">${mobileItems.map(([path, label, glyph]) => `<a href="#/${path}" class="${active === path ? 'active' : ''}">${icon(glyph)}<span>${label}</span></a>`).join('')}</nav>
@@ -366,7 +369,7 @@
       checkHealth();
       return;
     }
-    if (!state.role) { go('welcome'); return; }
+    if (!state.role && route !== 'opportunities') { go('welcome'); return; }
     if (studentOnly.includes(route) && state.role !== 'student') { go('admin'); return; }
     if (route.startsWith('admin') && state.role !== 'admin') { go('dashboard'); return; }
     if (!['dashboard', 'opportunities', 'applications', 'interviews', 'placements', 'profile', 'admin', 'admin/students', 'admin/companies', 'admin/opportunities', 'admin/applications', 'admin-opportunities', 'admin-applications'].includes(route)) { go(state.role === 'admin' ? 'admin' : 'dashboard'); return; }
